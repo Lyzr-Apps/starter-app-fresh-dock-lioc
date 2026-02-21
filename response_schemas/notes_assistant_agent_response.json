@@ -1,0 +1,26 @@
+{
+  "agent_name": "Notes Assistant Agent",
+  "agent_id": "69995932bbc45d3372ca0a6b",
+  "description": "Manages note CRUD operations \u2014 creates, retrieves, updates, and deletes notes in VeloDB based on user requests. Handles natural language commands and structured form inputs.",
+  "agent_type": "json",
+  "accessor": "result",
+  "auto_generated": true,
+  "response_schema": {
+    "response": "string",
+    "action_performed": "string",
+    "note_data": {
+      "title": "string",
+      "content": "string",
+      "note_id": "string"
+    }
+  },
+  "example_response": {
+    "response": "The assistant's response to the user's request",
+    "action_performed": "The action that was performed: create, read, update, delete, list, search, or general",
+    "note_data": {
+      "title": "The note title if applicable",
+      "content": "The note content if applicable",
+      "note_id": "The note ID if applicable"
+    }
+  }
+}

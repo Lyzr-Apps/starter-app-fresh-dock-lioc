@@ -1,0 +1,32 @@
+{
+  "nodes": [
+    {
+      "id": "input_node",
+      "type": "Input",
+      "label": "User Input",
+      "nodeCategory": "input"
+    },
+    {
+      "id": "notes_assistant_agent",
+      "type": "Agent",
+      "label": "Notes Assistant Agent",
+      "nodeCategory": "agent"
+    },
+    {
+      "id": "output_node",
+      "type": "Output",
+      "label": "Output",
+      "nodeCategory": "end"
+    }
+  ],
+  "edges": [
+    {
+      "source": "input_node",
+      "target": "notes_assistant_agent"
+    },
+    {
+      "source": "notes_assistant_agent",
+      "target": "output_node"
+    }
+  ]
+}
