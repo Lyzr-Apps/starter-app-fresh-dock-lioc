@@ -14,6 +14,7 @@ import { FiPlus, FiTrash2, FiEdit3, FiSearch, FiSave, FiMessageSquare, FiX, FiSe
 
 // ---- Constants ----
 const AGENT_ID = '69995932bbc45d3372ca0a6b'
+const STORAGE_KEY = 'notekeeper_notes'
 
 const THEME_VARS: React.CSSProperties & Record<string, string> = {
   '--background': '40 30% 96%',
@@ -258,29 +259,58 @@ export default function Page() {
   const chatEndRef = useRef<HTMLDivElement>(null)
   const statusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Simulated initial loading
+  // Load notes from localStorage on mount
   useEffect(() => {
-    const timer = setTimeout(() => setInitialLoading(false), 800)
-    return () => clearTimeout(timer)
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY)
+      if (stored) {
+        const parsed = JSON.parse(stored)
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setNotes(parsed)
+        }
+      }
+    } catch {
+      // Ignore parse errors, start with empty notes
+    }
+    setInitialLoading(false)
   }, [])
 
-  // Sample data toggle
+  // Persist notes to localStorage whenever they change (skip during initial load)
+  const isInitialLoadDone = useRef(false)
+  useEffect(() => {
+    if (initialLoading) return
+    // Skip the very first render after loading (that's the load itself)
+    if (!isInitialLoadDone.current) {
+      isInitialLoadDone.current = true
+      return
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(notes))
+    } catch {
+      // Storage full or unavailable — silently fail
+    }
+  }, [notes, initialLoading])
+
+  // Sample data toggle — merges sample notes without removing user notes
   useEffect(() => {
     if (showSampleData) {
-      setNotes(SAMPLE_NOTES)
-      if (SAMPLE_NOTES.length > 0) {
-        setSelectedNoteId(SAMPLE_NOTES[0].id)
-        setEditTitle(SAMPLE_NOTES[0].title)
-        setEditContent(SAMPLE_NOTES[0].content)
+      setNotes((prev) => {
+        const sampleIds = new Set(SAMPLE_NOTES.map((s) => s.id))
+        const withoutSamples = prev.filter((n) => !sampleIds.has(n.id))
+        return [...SAMPLE_NOTES, ...withoutSamples]
+      })
+    } else {
+      const sampleIds = new Set(SAMPLE_NOTES.map((s) => s.id))
+      setNotes((prev) => prev.filter((n) => !sampleIds.has(n.id)))
+      // If selected note was a sample, deselect
+      if (selectedNoteId && sampleIds.has(selectedNoteId)) {
+        setSelectedNoteId(null)
+        setEditTitle('')
+        setEditContent('')
         setIsNewNote(false)
       }
-    } else {
-      setNotes([])
-      setSelectedNoteId(null)
-      setEditTitle('')
-      setEditContent('')
-      setIsNewNote(false)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showSampleData])
 
   // Scroll chat to bottom
