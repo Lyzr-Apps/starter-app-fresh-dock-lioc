@@ -10,11 +10,79 @@ import { Switch } from '@/components/ui/switch'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
-import { FiPlus, FiTrash2, FiEdit3, FiSearch, FiSave, FiMessageSquare, FiX, FiSend, FiFileText, FiBook, FiChevronDown, FiChevronUp, FiLoader, FiAlertCircle, FiCheck, FiClock } from 'react-icons/fi'
+import { FiPlus, FiTrash2, FiEdit3, FiSearch, FiSave, FiMessageSquare, FiX, FiSend, FiFileText, FiBook, FiChevronDown, FiChevronUp, FiLoader, FiAlertCircle, FiCheck, FiClock, FiDatabase, FiRefreshCw, FiCloud, FiCloudOff } from 'react-icons/fi'
 
 // ---- Constants ----
 const AGENT_ID = '69995932bbc45d3372ca0a6b'
 const STORAGE_KEY = 'notekeeper_notes'
+const VELODB_API = '/api/velodb'
+
+// ---- VeloDB API Client (Client-side) ----
+async function velodbFetch(path: string, options?: RequestInit) {
+  try {
+    const res = await fetch(`${VELODB_API}${path}`, {
+      ...options,
+      headers: { 'Content-Type': 'application/json', ...options?.headers },
+    })
+    return await res.json()
+  } catch {
+    return { success: false, error: 'Network error' }
+  }
+}
+
+async function checkVeloDBStatus(): Promise<{ connected: boolean; message: string }> {
+  const res = await velodbFetch('?action=status')
+  return { connected: res?.connected === true, message: res?.message || 'Unknown status' }
+}
+
+async function initVeloDB(): Promise<boolean> {
+  const res = await velodbFetch('?action=init')
+  return res?.success === true
+}
+
+async function fetchNotesFromVeloDB(): Promise<Note[] | null> {
+  const res = await velodbFetch('?action=list')
+  if (!res?.success || !Array.isArray(res.notes)) return null
+  return res.notes.map((n: any) => ({
+    id: n.id,
+    title: n.title || '',
+    content: n.content || '',
+    createdAt: n.created_at || n.createdAt || new Date().toISOString(),
+    updatedAt: n.updated_at || n.updatedAt || new Date().toISOString(),
+  }))
+}
+
+async function saveNoteToVeloDB(note: Note, isNew: boolean): Promise<boolean> {
+  const res = await velodbFetch('', {
+    method: 'POST',
+    body: JSON.stringify({
+      action: isNew ? 'create' : 'update',
+      note: {
+        id: note.id,
+        title: note.title,
+        content: note.content,
+        created_at: note.createdAt,
+      },
+    }),
+  })
+  return res?.success === true
+}
+
+async function deleteNoteFromVeloDB(id: string): Promise<boolean> {
+  const res = await velodbFetch('', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'delete', id }),
+  })
+  return res?.success === true
+}
+
+async function syncNotesToVeloDB(notes: Note[]): Promise<{ success: boolean; synced: number }> {
+  const res = await velodbFetch('', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'sync', notes }),
+  })
+  return { success: res?.success === true, synced: res?.synced ?? 0 }
+}
 
 const THEME_VARS: React.CSSProperties & Record<string, string> = {
   '--background': '40 30% 96%',
@@ -249,6 +317,11 @@ export default function Page() {
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
 
+  // VeloDB state
+  const [veloConnected, setVeloConnected] = useState(false)
+  const [veloChecking, setVeloChecking] = useState(true)
+  const [veloSyncing, setVeloSyncing] = useState(false)
+
   // Chat state
   const [chatOpen, setChatOpen] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
@@ -259,36 +332,68 @@ export default function Page() {
   const chatEndRef = useRef<HTMLDivElement>(null)
   const statusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Load notes from localStorage on mount
+  // Load notes: try VeloDB first, fallback to localStorage
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY)
-      if (stored) {
-        const parsed = JSON.parse(stored)
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setNotes(parsed)
+    async function loadNotes() {
+      // 1. Check VeloDB status
+      const status = await checkVeloDBStatus()
+      setVeloConnected(status.connected)
+      setVeloChecking(false)
+
+      if (status.connected) {
+        // 2a. Initialize table and fetch from VeloDB
+        await initVeloDB()
+        const dbNotes = await fetchNotesFromVeloDB()
+        if (dbNotes && dbNotes.length > 0) {
+          setNotes(dbNotes)
+          // Update localStorage cache
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(dbNotes)) } catch {}
+          setInitialLoading(false)
+          return
         }
+        // VeloDB is connected but empty — check localStorage for migration
+        try {
+          const stored = localStorage.getItem(STORAGE_KEY)
+          if (stored) {
+            const parsed = JSON.parse(stored)
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setNotes(parsed)
+              // Auto-sync localStorage notes to VeloDB
+              const nonSample = parsed.filter((n: Note) => !n.id.startsWith('sample-'))
+              if (nonSample.length > 0) {
+                syncNotesToVeloDB(nonSample).catch(() => {})
+              }
+            }
+          }
+        } catch {}
+      } else {
+        // 2b. VeloDB not available — use localStorage
+        try {
+          const stored = localStorage.getItem(STORAGE_KEY)
+          if (stored) {
+            const parsed = JSON.parse(stored)
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setNotes(parsed)
+            }
+          }
+        } catch {}
       }
-    } catch {
-      // Ignore parse errors, start with empty notes
+      setInitialLoading(false)
     }
-    setInitialLoading(false)
+    loadNotes()
   }, [])
 
   // Persist notes to localStorage whenever they change (skip during initial load)
   const isInitialLoadDone = useRef(false)
   useEffect(() => {
     if (initialLoading) return
-    // Skip the very first render after loading (that's the load itself)
     if (!isInitialLoadDone.current) {
       isInitialLoadDone.current = true
       return
     }
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(notes))
-    } catch {
-      // Storage full or unavailable — silently fail
-    }
+    } catch {}
   }, [notes, initialLoading])
 
   // Sample data toggle — merges sample notes without removing user notes
@@ -369,27 +474,47 @@ export default function Page() {
       setNotes((prev) => [newNote, ...prev])
       setSelectedNoteId(newNote.id)
       setIsNewNote(false)
-      showStatus('success', 'Note created successfully.')
+
+      // Persist to VeloDB in background
+      if (veloConnected) {
+        const saved = await saveNoteToVeloDB(newNote, true)
+        showStatus('success', saved ? 'Note created and saved to VeloDB.' : 'Note created locally. VeloDB sync failed.')
+      } else {
+        showStatus('success', 'Note created locally.')
+      }
     } else if (selectedNoteId) {
+      const existingNote = notes.find((n) => n.id === selectedNoteId)
+      const updatedNote: Note = {
+        id: selectedNoteId,
+        title: editTitle.trim() || 'Untitled',
+        content: editContent.trim(),
+        createdAt: existingNote?.createdAt || now,
+        updatedAt: now,
+      }
       setNotes((prev) =>
-        prev.map((n) =>
-          n.id === selectedNoteId
-            ? { ...n, title: editTitle.trim() || 'Untitled', content: editContent.trim(), updatedAt: now }
-            : n
-        )
+        prev.map((n) => n.id === selectedNoteId ? updatedNote : n)
       )
-      showStatus('success', 'Note updated successfully.')
+
+      // Persist to VeloDB in background
+      if (veloConnected) {
+        const saved = await saveNoteToVeloDB(updatedNote, false)
+        showStatus('success', saved ? 'Note updated and saved to VeloDB.' : 'Note updated locally. VeloDB sync failed.')
+      } else {
+        showStatus('success', 'Note updated locally.')
+      }
     }
 
-    // Brief delay for visual feedback
-    await new Promise((r) => setTimeout(r, 300))
     setSaving(false)
-  }, [editTitle, editContent, isNewNote, selectedNoteId, showStatus])
+  }, [editTitle, editContent, isNewNote, selectedNoteId, showStatus, veloConnected, notes])
 
   // Delete note
   const handleDeleteNote = useCallback(async (noteId: string) => {
     setDeleting(true)
-    await new Promise((r) => setTimeout(r, 300))
+
+    // Delete from VeloDB in background
+    if (veloConnected && !noteId.startsWith('sample-')) {
+      await deleteNoteFromVeloDB(noteId)
+    }
 
     setNotes((prev) => prev.filter((n) => n.id !== noteId))
     if (selectedNoteId === noteId) {
@@ -400,8 +525,44 @@ export default function Page() {
     }
     setDeleteConfirmId(null)
     setDeleting(false)
-    showStatus('success', 'Note deleted successfully.')
-  }, [selectedNoteId, showStatus])
+    showStatus('success', veloConnected ? 'Note deleted from VeloDB.' : 'Note deleted locally.')
+  }, [selectedNoteId, showStatus, veloConnected])
+
+  // Sync all local notes to VeloDB
+  const handleSyncToVeloDB = useCallback(async () => {
+    if (!veloConnected) {
+      showStatus('error', 'VeloDB is not connected. Configure VELODB_HOST in .env first.')
+      return
+    }
+    setVeloSyncing(true)
+    const nonSample = notes.filter((n) => !n.id.startsWith('sample-'))
+    const result = await syncNotesToVeloDB(nonSample)
+    setVeloSyncing(false)
+    if (result.success) {
+      showStatus('success', `Synced ${result.synced} notes to VeloDB.`)
+    } else {
+      showStatus('error', 'Failed to sync notes to VeloDB.')
+    }
+  }, [veloConnected, notes, showStatus])
+
+  // Re-check VeloDB connection
+  const handleCheckVeloDB = useCallback(async () => {
+    setVeloChecking(true)
+    const status = await checkVeloDBStatus()
+    setVeloConnected(status.connected)
+    setVeloChecking(false)
+    if (status.connected) {
+      await initVeloDB()
+      showStatus('success', 'VeloDB connected. Table initialized.')
+      // Fetch latest notes from VeloDB
+      const dbNotes = await fetchNotesFromVeloDB()
+      if (dbNotes && dbNotes.length > 0) {
+        setNotes(dbNotes)
+      }
+    } else {
+      showStatus('info', 'VeloDB not configured. Set VELODB_HOST in .env to enable.')
+    }
+  }, [showStatus])
 
   // Chat send
   const handleSendChat = useCallback(async () => {
@@ -436,7 +597,7 @@ export default function Page() {
       }
       setChatMessages((prev) => [...prev, assistantMsg])
 
-      // If agent created/updated a note, reflect in local state
+      // If agent created/updated a note, reflect in local state + VeloDB
       if (actionPerformed === 'create' && noteData?.title) {
         const newNote: Note = {
           id: noteData?.note_id ?? generateId(),
@@ -446,6 +607,9 @@ export default function Page() {
           updatedAt: new Date().toISOString(),
         }
         setNotes((prev) => [newNote, ...prev])
+        if (veloConnected) {
+          saveNoteToVeloDB(newNote, true).catch(() => {})
+        }
         showStatus('info', 'Note created via assistant.')
       }
     } catch (err) {
@@ -460,7 +624,7 @@ export default function Page() {
     } finally {
       setChatLoading(false)
     }
-  }, [chatInput, showStatus])
+  }, [chatInput, showStatus, veloConnected])
 
   const selectedNote = notes.find((n) => n.id === selectedNoteId) ?? null
   const isEditorActive = isNewNote || selectedNoteId !== null
@@ -492,6 +656,20 @@ export default function Page() {
                   <FiX className="w-3.5 h-3.5" />
                 </button>
               )}
+            </div>
+
+            {/* VeloDB Status Indicator */}
+            <div className="flex items-center gap-1.5 hidden md:flex">
+              {veloChecking ? (
+                <FiLoader className="w-3.5 h-3.5 text-muted-foreground animate-spin" />
+              ) : veloConnected ? (
+                <FiCloud className="w-3.5 h-3.5 text-green-600" />
+              ) : (
+                <FiCloudOff className="w-3.5 h-3.5 text-muted-foreground" />
+              )}
+              <span className={`text-xs ${veloConnected ? 'text-green-700' : 'text-muted-foreground'}`}>
+                {veloChecking ? 'Connecting...' : veloConnected ? 'VeloDB' : 'Local'}
+              </span>
             </div>
 
             {/* Sample Data Toggle */}
@@ -806,17 +984,63 @@ export default function Page() {
           </div>
         )}
 
-        {/* ===== AGENT INFO SECTION ===== */}
-        <div className="fixed bottom-6 left-6 z-40 hidden lg:block">
+        {/* ===== AGENT & VELODB STATUS SECTION ===== */}
+        <div className="fixed bottom-6 left-6 z-40 hidden lg:block space-y-2">
+          {/* VeloDB Status Card */}
+          <div className="bg-card border border-border rounded-lg shadow-md px-4 py-3 max-w-xs">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <FiDatabase className="w-3.5 h-3.5 text-muted-foreground" />
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">VeloDB</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {veloChecking ? (
+                  <FiLoader className="w-3 h-3 text-muted-foreground animate-spin" />
+                ) : veloConnected ? (
+                  <FiCloud className="w-3.5 h-3.5 text-green-600" />
+                ) : (
+                  <FiCloudOff className="w-3.5 h-3.5 text-muted-foreground" />
+                )}
+                <span className={`text-xs ${veloConnected ? 'text-green-700' : 'text-muted-foreground'}`}>
+                  {veloChecking ? 'Checking...' : veloConnected ? 'Connected' : 'Not configured'}
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleCheckVeloDB}
+                disabled={veloChecking}
+                className="flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-border bg-secondary/50 hover:bg-secondary text-secondary-foreground transition-colors disabled:opacity-50"
+              >
+                <FiRefreshCw className={`w-3 h-3 ${veloChecking ? 'animate-spin' : ''}`} />
+                Reconnect
+              </button>
+              <button
+                onClick={handleSyncToVeloDB}
+                disabled={!veloConnected || veloSyncing}
+                className="flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-border bg-primary/10 hover:bg-primary/20 text-foreground transition-colors disabled:opacity-50"
+              >
+                {veloSyncing ? <FiLoader className="w-3 h-3 animate-spin" /> : <FiDatabase className="w-3 h-3" />}
+                Sync Notes
+              </button>
+            </div>
+            {!veloConnected && !veloChecking && (
+              <p className="text-xs text-muted-foreground mt-2 leading-relaxed">
+                Set VELODB_HOST in .env to enable persistent database storage.
+              </p>
+            )}
+          </div>
+
+          {/* Agent Status Card */}
           <div className="bg-card border border-border rounded-lg shadow-md px-4 py-3 max-w-xs">
             <div className="flex items-center gap-2 mb-1.5">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Powered by</span>
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">AI Agent</span>
             </div>
             <div className="flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full flex-shrink-0 ${activeAgentId === AGENT_ID ? 'bg-amber-500 animate-pulse' : 'bg-green-500'}`} />
-              <span className="text-sm font-medium text-foreground">Notes Assistant Agent</span>
+              <span className="text-sm font-medium text-foreground">Notes Assistant</span>
             </div>
-            <p className="text-xs text-muted-foreground mt-1 leading-relaxed">Manages note CRUD operations via natural language commands.</p>
+            <p className="text-xs text-muted-foreground mt-1 leading-relaxed">Manages CRUD operations via natural language.</p>
           </div>
         </div>
       </div>
